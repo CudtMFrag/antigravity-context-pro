@@ -683,7 +683,8 @@ const CLIENT_UI_SCRIPT = String.raw`
     if (!input) return { ok: false, reason: 'no-input' };
 
     const existing = (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim();
-    if (existing.length > 0 && existing !== '/compact') {
+    const hasCompactPill = Boolean(input.querySelector?.('[data-uri="slashCommand:compact"]'));
+    if (existing.length > 0 && existing !== '/compact' && !hasCompactPill) {
       flashRingStatus('Clear input', 1600);
       return { ok: false, reason: 'draft-not-empty' };
     }
@@ -691,7 +692,7 @@ const CLIENT_UI_SCRIPT = String.raw`
     window.__AGY_COMPACT_LOCK_UNTIL__ = Date.now() + 4000;
     input.focus();
 
-    if (existing !== '/compact') {
+    if (existing !== '/compact' && !hasCompactPill) {
       if (input.tagName === 'TEXTAREA') {
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
         if (setter) setter.call(input, '/compact');
@@ -732,28 +733,39 @@ const CLIENT_UI_SCRIPT = String.raw`
           cancelable: true
         }));
       }
-      setTimeout(() => {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+
+      const submitComposer = () => {
+        const sendBtn = composer.querySelector(
+          '[data-testid^="send-button"]:not([disabled]), .agy-send-button:not([disabled]), ' +
+          'button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled])'
+        );
+        if (sendBtn) {
+          sendBtn.click();
+          return;
+        }
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
         setTimeout(() => {
-          const sendBtn = composer.querySelector(
-            '[data-testid^="send-button"]:not([disabled]), .agy-send-button:not([disabled]), ' +
-            'button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled])'
-          );
-          if (sendBtn) {
-            sendBtn.click();
+          const stillHasCompact = Boolean(input.querySelector('[data-uri="slashCommand:compact"]')) ||
+            (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim() === '/compact';
+          if (stillHasCompact) {
+            input.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, metaKey: true, ctrlKey: true, bubbles: true, cancelable: true
+            }));
+          }
+        }, 120);
+      };
+
+      // Step 1: Wait for Lexical typeahead popup to appear, then press Enter to convert /compact into a slashCommand:compact pill
+      setTimeout(() => {
+        if (input.tagName !== 'TEXTAREA' && !input.querySelector('[data-uri="slashCommand:compact"]')) {
+          if (input.getAttribute('aria-expanded') === 'true') {
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+            setTimeout(submitComposer, 110);
             return;
           }
-          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-          setTimeout(() => {
-            const cur = (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim();
-            if (cur === '/compact') {
-              input.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, metaKey: true, ctrlKey: true, bubbles: true, cancelable: true
-              }));
-            }
-          }, 120);
-        }, 40);
-      }, 30);
+        }
+        submitComposer();
+      }, 120);
     }, 90);
 
     return { ok: true };
