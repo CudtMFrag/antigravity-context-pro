@@ -105,14 +105,15 @@ function isAntigravityAppRunning() {
 }
 
 function readDevToolsPort() {
-  if (!fs.existsSync(DEVTOOLS_PORT_FILE)) return null;
-  try {
-    const lines = fs.readFileSync(DEVTOOLS_PORT_FILE, 'utf8').trim().split(/\r?\n/);
-    const port = Number.parseInt((lines[0] || '').trim(), 10);
-    return Number.isFinite(port) && port > 0 ? port : null;
-  } catch {
-    return null;
+  if (fs.existsSync(DEVTOOLS_PORT_FILE)) {
+    try {
+      const lines = fs.readFileSync(DEVTOOLS_PORT_FILE, 'utf8').trim().split(/\r?\n/);
+      const port = Number.parseInt((lines[0] || '').trim(), 10);
+      if (Number.isFinite(port) && port > 0) return port;
+    } catch {}
   }
+  const envPort = Number.parseInt((process.env.AGY_CDP_PORT || '').trim(), 10);
+  return Number.isFinite(envPort) && envPort > 0 ? envPort : null;
 }
 
 async function listTargetPages(port) {
@@ -126,8 +127,13 @@ async function listTargetPages(port) {
         p.type === 'page' &&
         p.webSocketDebuggerUrl &&
         p.url &&
-        (p.url.includes('127.0.0.1') || p.url.includes('localhost')) &&
-        !p.url.includes('devtools://')
+        (p.url.includes('127.0.0.1') ||
+          p.url.includes('localhost') ||
+          p.url.startsWith('file://') ||
+          p.url.startsWith('app://')) &&
+        !p.url.includes('devtools://') &&
+        !p.url.startsWith('plugin://') &&
+        p.url !== 'about:blank'
     );
   } catch {
     return null;
@@ -280,14 +286,6 @@ const CLIENT_UI_SCRIPT = String.raw`
   }
 
   function findDesktopContextSidecarUrl(store, featCtx) {
-    const slot = document.querySelector('[data-sidecar-id="desktop-context/context"]');
-    if (slot?.getAttribute('data-sidecar-url')) {
-      return slot.getAttribute('data-sidecar-url').split('&conversationId=')[0].split('?conversationId=')[0];
-    }
-    const iframe = document.querySelector('iframe[src*="desktop-context"]');
-    if (iframe?.src) {
-      return iframe.src.split('&conversationId=')[0].split('?conversationId=')[0];
-    }
     try {
       const ext = featCtx?.get?.('extensibility');
       const sidecars = ext?.provider?.getState?.();
@@ -306,6 +304,14 @@ const CLIENT_UI_SCRIPT = String.raw`
         }
       }
     } catch (_) {}
+    const iframe = document.querySelector('iframe[src*="desktop-context"]');
+    if (iframe?.src) {
+      return iframe.src.split('&conversationId=')[0].split('?conversationId=')[0];
+    }
+    const slot = document.querySelector('[data-sidecar-id="desktop-context/context"]');
+    if (slot?.getAttribute('data-sidecar-url')) {
+      return slot.getAttribute('data-sidecar-url').split('&conversationId=')[0].split('?conversationId=')[0];
+    }
     try {
       const st = store?.getState?.();
       const panes = [
@@ -337,7 +343,7 @@ const CLIENT_UI_SCRIPT = String.raw`
       const convId = getActiveConvId();
       const search = window.__TSR_ROUTER__?.state?.location?.search || {};
       const projOrSec = search.project || search.section;
-      const treeId = convId
+      const panelScope = convId
         ? { kind: 'cascadeId', cascadeId: convId }
         : projOrSec
           ? { kind: 'newConversation', projectId: projOrSec, sectionId: projOrSec }
@@ -367,7 +373,8 @@ const CLIENT_UI_SCRIPT = String.raw`
           }
         };
         const setPayload = {
-          treeId,
+          panelScope,
+          treeId: panelScope,
           content,
           tabId,
           keepOpen: true
@@ -376,9 +383,11 @@ const CLIENT_UI_SCRIPT = String.raw`
         // Antigravity 2.0+ (sidePanelV2 & sidePanel)
         store.dispatch({ type: 'sidePanelV2/setContent', payload: setPayload });
         store.dispatch({ type: 'sidePanel/setContent', payload: setPayload });
-        store.dispatch({ type: 'sidePanelV2/setActiveTab', payload: { treeId, tabId } });
-        store.dispatch({ type: 'sidePanel/setActiveTab', payload: { treeId, tabId } });
-        store.dispatch({ type: 'sidePanel/setSidePanelOpen', payload: { treeId, isOpen: true } });
+        store.dispatch({ type: 'sidePanelV2/setActiveTab', payload: { panelScope, treeId: panelScope, tabId } });
+        store.dispatch({ type: 'sidePanel/setActiveTab', payload: { panelScope, treeId: panelScope, tabId } });
+        store.dispatch({ type: 'sidePanel/setSidePanelOpen', payload: { panelScope, treeId: panelScope, isOpen: true } });
+        store.dispatch({ type: 'sidePanel/setPaneOpen', payload: { panelScope, treeId: panelScope, isOpen: true } });
+        store.dispatch({ type: 'sidePanelV2/setSidePanelOpen', payload: { panelScope, treeId: panelScope, isOpen: true } });
 
         // If inside a subagent conversation, also open the root conversation's side panel
         if (convId) {
@@ -393,9 +402,10 @@ const CLIENT_UI_SCRIPT = String.raw`
               parentId = summaries?.[rootId]?.trajectoryMetadata?.parentConversationId;
             }
             if (rootId && rootId !== convId) {
+              const rootScope = { kind: 'cascadeId', cascadeId: rootId };
               store.dispatch({
                 type: 'sidePanel/setSidePanelOpen',
-                payload: { treeId: { kind: 'cascadeId', cascadeId: rootId }, isOpen: true }
+                payload: { panelScope: rootScope, treeId: rootScope, isOpen: true }
               });
             }
           } catch (_) {}
@@ -403,7 +413,7 @@ const CLIENT_UI_SCRIPT = String.raw`
 
         // Legacy Antigravity (auxPaneV2 & auxPane)
         store.dispatch({ type: 'auxPaneV2/setContent', payload: setPayload });
-        store.dispatch({ type: 'auxPane/setAuxPaneOpen', payload: { treeId, isOpen: true } });
+        store.dispatch({ type: 'auxPane/setAuxPaneOpen', payload: { panelScope, treeId: panelScope, isOpen: true } });
 
         if (window.__TSR_ROUTER__?.navigate) {
           window.__TSR_ROUTER__.navigate({
@@ -411,6 +421,30 @@ const CLIENT_UI_SCRIPT = String.raw`
             replace: true
           });
         }
+
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            const spEl = document.querySelector('[data-side-panel-open], [data-aux-pane-open]');
+            const isOpen = spEl
+              ? spEl.getAttribute('data-side-panel-open') === 'true' ||
+                spEl.getAttribute('data-aux-pane-open') === 'true'
+              : false;
+            if (!isOpen) {
+              const toggleAuxBtn = document.querySelector('[data-testid="toggle-aux-sidebar"]');
+              if (toggleAuxBtn) toggleAuxBtn.click();
+            }
+            requestAnimationFrame(() => {
+              const tabBtn = document.querySelector('[data-tab-id="sidecar__desktop-context/context__/"]');
+              if (
+                tabBtn &&
+                tabBtn.getAttribute('aria-selected') !== 'true' &&
+                tabBtn.getAttribute('data-selected') !== 'true'
+              ) {
+                tabBtn.click();
+              }
+            });
+          }, 40);
+        });
         return;
       }
 
@@ -581,6 +615,10 @@ const CLIENT_UI_SCRIPT = String.raw`
 
   const SEG_COLORS = ['#9aa0a6', '#a8c7fa', '#4c8df6', '#f9ab00', '#c58af9'];
 
+  function escHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
   function ensureStyles() {
     let style = document.getElementById('agy-input-ring-styles');
     if (!style) {
@@ -592,8 +630,16 @@ const CLIENT_UI_SCRIPT = String.raw`
       '#' + RING_ID + ' { position: relative; display: inline-flex; align-items: center; margin: 0 2px; z-index: 50; font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }',
       '#agy-ring-btn { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--muted-foreground, #9aa0a6); font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease; }',
       '#agy-ring-btn:hover, #agy-ring-btn.active { background: rgba(128,128,128,0.1); border-color: rgba(128,128,128,0.18); color: var(--foreground, #e3e3e3); }',
-      '#' + POPOVER_ID + ' { position: fixed; width: 276px; padding: 11px 13px; border-radius: 10px; background: var(--card, #1b1c1f); color: var(--foreground, #e3e3e3); border: 1px solid var(--border, rgba(128,128,128,0.22)); box-shadow: 0 10px 28px rgba(0,0,0,0.36); backdrop-filter: blur(16px); font-size: 12px; line-height: 1.35; z-index: 99999; display: none; text-align: left; }',
+      '#' + POPOVER_ID + ' { position: fixed; width: 304px; padding: 11px 13px; border-radius: 10px; background: var(--card, #1b1c1f); color: var(--foreground, #e3e3e3); border: 1px solid var(--border, rgba(128,128,128,0.22)); box-shadow: 0 10px 28px rgba(0,0,0,0.36); backdrop-filter: blur(16px); font-size: 12px; line-height: 1.35; z-index: 99999; display: none; text-align: left; }',
       '#' + POPOVER_ID + '.open { display: block; }',
+      '.agy-pop-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }',
+      '.agy-pop-title { display: inline-flex; align-items: center; gap: 5px; min-width: 0; font-weight: 600; font-size: 12px; }',
+      '.agy-pop-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.agy-pop-usage { font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--muted-foreground, #9aa0a6); white-space: nowrap; flex-shrink: 0; }',
+      '.agy-pop-phase { font-size: 10px; font-weight: 500; line-height: 1.3; padding: 0 5px; border-radius: 4px; border: 1px solid rgba(197,138,249,0.38); color: #c58af9; background: rgba(197,138,249,0.12); flex-shrink: 0; }',
+      '.agy-pop-phase.exec { border-color: rgba(76,141,246,0.38); color: #4c8df6; background: rgba(76,141,246,0.12); }',
+      '.agy-pop-orch { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 5px; font-size: 10.5px; color: var(--muted-foreground, #9aa0a6); margin: -1px 0 6px; line-height: 1.35; }',
+      '.agy-pop-orch .active { color: var(--foreground, #e3e3e3); font-weight: 500; }',
       '.agy-m-row { display: grid; grid-template-columns: 15px 1fr auto; align-items: center; gap: 7px; padding: 4px 0; }',
       '.agy-m-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--muted-foreground, #9aa0a6); opacity: 0.65; }',
       '.agy-m-label { color: var(--muted-foreground, #9aa0a6); font-size: 11.5px; }',
@@ -607,7 +653,7 @@ const CLIENT_UI_SCRIPT = String.raw`
 
   function positionPopover(btn, pop) {
     const rect = btn.getBoundingClientRect();
-    const popWidth = 276;
+    const popWidth = 304;
     const left = Math.max(8, Math.min(window.innerWidth - popWidth - 8, rect.right - popWidth));
     pop.style.left = left + 'px';
     pop.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
@@ -677,14 +723,14 @@ const CLIENT_UI_SCRIPT = String.raw`
     if (!target || !target.container) return;
 
     let wrap = document.getElementById(RING_ID);
-    if (wrap && wrap.dataset.v !== '3') {
+    if (wrap && wrap.dataset.v !== '4') {
       wrap.remove();
       wrap = null;
     }
     if (!wrap) {
       wrap = document.createElement('div');
       wrap.id = RING_ID;
-      wrap.dataset.v = '3';
+      wrap.dataset.v = '4';
       wrap.innerHTML = [
         '<button type="button" id="agy-ring-btn">',
         '  <svg width="13" height="13" viewBox="0 0 36 36" style="transform: rotate(-90deg); flex: none;">',
@@ -765,11 +811,40 @@ const CLIENT_UI_SCRIPT = String.raw`
       })
       .join('');
 
+    const orch = r.orchestrator;
+    let headerHtml = '';
+    if (orch && orch.active) {
+      const isExec = orch.phase === 'execute';
+      const phaseLabel = isExec ? 'Exec' : 'Plan';
+      const title = orch.planner_model && orch.planner_model.startsWith('Orchestrator')
+        ? orch.planner_model
+        : 'Orchestrator';
+      const orchParts = [];
+      if (orch.planner_model) {
+        orchParts.push('<span class="' + (!isExec ? 'active' : '') + '">' + escHtml(orch.planner_model) + '</span>');
+      }
+      if (orch.execution_model) {
+        orchParts.push('<span class="' + (isExec ? 'active' : '') + '">' + escHtml(orch.execution_model) + '</span>');
+      }
+      headerHtml = [
+        '<div class="agy-pop-head">',
+        '  <span class="agy-pop-title"><span class="agy-pop-name" title="' + escHtml(title) + '">' + escHtml(title) + '</span><span class="agy-pop-phase' + (isExec ? ' exec' : '') + '">' + phaseLabel + '</span></span>',
+        '  <span class="agy-pop-usage"><strong style="color:var(--foreground,#e3e3e3);font-weight:600;">' + fmtTok(used) + '</strong> / ' + fmtTok(limit) + ' (' + pct.toFixed(1) + '%)</span>',
+        '</div>',
+        orchParts.length ? '<div class="agy-pop-orch">' + orchParts.join('<span>→</span>') + '</div>' : ''
+      ].join('');
+    } else {
+      const modelLabel = r.model || 'Model';
+      headerHtml = [
+        '<div class="agy-pop-head">',
+        '  <span class="agy-pop-title"><span class="agy-pop-name" title="' + escHtml(modelLabel) + '">' + escHtml(modelLabel) + '</span></span>',
+        '  <span class="agy-pop-usage"><strong style="color:var(--foreground,#e3e3e3);font-weight:600;">' + fmtTok(used) + '</strong> / ' + fmtTok(limit) + ' (' + pct.toFixed(1) + '%)</span>',
+        '</div>'
+      ].join('');
+    }
+
     pop.innerHTML = [
-      '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">',
-      '  <span style="font-weight:600;font-size:12px;">' + (r.model || 'Model') + '</span>',
-      '  <span style="font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--muted-foreground,#9aa0a6);"><strong style="color:var(--foreground,#e3e3e3);font-weight:600;">' + fmtTok(used) + '</strong> / ' + fmtTok(limit) + ' (' + pct.toFixed(1) + '%)</span>',
-      '</div>',
+      headerHtml,
       '<div style="height:3px;border-radius:999px;background:rgba(128,128,128,0.18);overflow:hidden;display:flex;margin-bottom:8px;">' + barHtml + '</div>',
       '<div class="agy-m-row">',
       '  <span class="agy-m-icon">' + ICONS.speed + '</span>',
@@ -895,6 +970,8 @@ export function startRingInjector(options = {}) {
 
   let ticking = false;
   let unreachableCount = 0;
+  let warnedMissingPort = false;
+  let warnedUnreachablePort = false;
 
   function releaseLockAndExit(reason) {
     if (isSidecarHosted) return;
@@ -943,10 +1020,27 @@ export function startRingInjector(options = {}) {
       }
 
       const port = readDevToolsPort();
-      if (!port) return;
+      if (!port) {
+        if (!warnedMissingPort) {
+          warnedMissingPort = true;
+          console.warn(
+            `[agy-input-ring] DevToolsActivePort not found (${DEVTOOLS_PORT_FILE}). ` +
+              'Antigravity v2.33+ disables the startup debug port by default; input-box ring injection requires launching Antigravity with --remote-debugging-port or setting AGY_CDP_PORT.'
+          );
+        }
+        return;
+      }
+      warnedMissingPort = false;
 
       const pages = await listTargetPages(port);
       if (pages === null) {
+        if (!warnedUnreachablePort) {
+          warnedUnreachablePort = true;
+          console.warn(
+            `[agy-input-ring] DevTools CDP port ${port} is not listening. ` +
+              `Launch Antigravity with --remote-debugging-port=${port} (or run scripts/install.sh to install the default Context Ring launcher) to enable the input-box ring.`
+          );
+        }
         unreachableCount += 1;
         if (!isSidecarHosted && unreachableCount >= 3 && !(await isAntigravityAppRunning())) {
           releaseLockAndExit('DevTools port closed');
@@ -954,6 +1048,7 @@ export function startRingInjector(options = {}) {
         }
         return;
       }
+      warnedUnreachablePort = false;
       unreachableCount = 0;
 
       const seenIds = new Set(pages.map((p) => p.id));

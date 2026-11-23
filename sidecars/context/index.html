@@ -44,13 +44,29 @@
 
   /* header */
   .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-  .model { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
+  .model-wrap { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .model { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .live { width: 6px; height: 6px; border-radius: 50%; background: var(--empty); flex: none; }
   .live.on { background: #81c995; }
+  .orch-badge {
+    font-size: 10px; font-weight: 500; line-height: 1.3; padding: 0 5px; border-radius: 4px;
+    border: 1px solid color-mix(in srgb, var(--c-custom) 35%, transparent);
+    color: var(--c-custom); background: color-mix(in srgb, var(--c-custom) 10%, transparent);
+  }
+  .orch-badge.exec {
+    border-color: color-mix(in srgb, var(--c-agent) 35%, transparent);
+    color: var(--c-agent); background: color-mix(in srgb, var(--c-agent) 10%, transparent);
+  }
+  .orch-pair {
+    font-size: 11px; color: var(--dim); display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    padding-left: 12px;
+  }
+  .orch-pair .active-role { color: var(--fg); font-weight: 500; }
   .usage { margin: 2px 0 12px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   .usage .big { font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
   .usage .of { color: var(--dim); }
-  .usage .pct { margin-left: auto; font-size: 13px; font-weight: 600; }
+  .usage .pct-wrap { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; }
+  .usage .pct { font-size: 13px; font-weight: 600; }
   button {
     font: inherit; font-size: 11.5px; color: var(--dim); cursor: pointer; white-space: nowrap;
     background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 2.5px 8px;
@@ -128,14 +144,16 @@
   .curve-chart-wrap {
     position: relative;
     width: 100%;
+    min-height: 164px;
     user-select: none;
     touch-action: none;
+    overflow: hidden;
   }
   .curve-svg {
     display: block;
     width: 100%;
-    height: auto;
-    overflow: visible;
+    height: 164px;
+    overflow: hidden;
   }
   .curve-tooltip {
     min-height: 24px;
@@ -255,6 +273,12 @@
   .turn-tag.user {
     color: var(--c-user);
     border-color: color-mix(in srgb, var(--c-user) 35%, transparent);
+  }
+  .turn-tag.model {
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .turn-detail {
@@ -409,6 +433,7 @@
   let lastJson = '';
   let selectedTurnStep = null;
   let showAllTurns = false;
+  let curveResizeObserver = null;
 
   const SVG_CHEVRON = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
   const SVG_TOOL = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
@@ -489,29 +514,88 @@
     return `<section><h2>${title} <span class="hint">${hint}</span></h2><ul class="files">${rows}</ul></section>`;
   }
 
+  function fmtAxisTok(n) {
+    const val = Number(n) || 0;
+    if (val >= 1e6) {
+      const v = val / 1e6;
+      return Number.isInteger(v) ? `${v}M` : `${v.toFixed(1)}M`;
+    }
+    if (val >= 1e3) {
+      const v = val / 1e3;
+      return Number.isInteger(v) ? `${v}k` : `${v.toFixed(1)}k`;
+    }
+    return String(Math.round(val));
+  }
+
   function fmtSec(ms) {
     if (!ms || ms <= 0) return '0.00s';
     if (ms < 1000) return `${ms}ms`;
     return `${(ms / 1000).toFixed(2)}s`;
   }
 
-  function makeSmoothPath(pts) {
+  function ringColor(pct) {
+    if (pct >= 80) return '#ef4444';
+    if (pct >= 55) return '#f59e0b';
+    return '#10b981';
+  }
+
+  function clampVal(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  function makeSmoothPath(pts, minY, maxY) {
     if (!pts || !pts.length) return '';
-    if (pts.length === 1) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
-    if (pts.length === 2) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)}`;
-    let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
-    for (let i = 0; i < pts.length - 1; i++) {
-      const p0 = pts[i === 0 ? i : i - 1];
-      const p1 = pts[i];
-      const p2 = pts[i + 1];
-      const p3 = pts[i + 2 < pts.length ? i + 2 : i + 1];
-      const cp1x = p1.x + (p2.x - p0.x) / 6;
-      const cp1y = p1.y + (p2.y - p0.y) / 6;
-      const cp2x = p2.x - (p3.x - p1.x) / 6;
-      const cp2y = p2.y - (p3.y - p1.y) / 6;
-      d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+    const n = pts.length;
+    if (n === 1) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+    if (n === 2) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)}`;
+
+    // Fritsch-Carlson monotone cubic Hermite interpolation (no overshoot on drops/spikes)
+    const dx = new Array(n - 1);
+    const d = new Array(n - 1);
+    for (let i = 0; i < n - 1; i++) {
+      dx[i] = Math.max(1e-6, pts[i + 1].x - pts[i].x);
+      d[i] = (pts[i + 1].y - pts[i].y) / dx[i];
     }
-    return d;
+
+    const m = new Array(n);
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for (let i = 1; i < n - 1; i++) {
+      if (d[i - 1] * d[i] <= 0) {
+        m[i] = 0;
+      } else {
+        m[i] = (d[i - 1] + d[i]) / 2;
+      }
+    }
+
+    for (let i = 0; i < n - 1; i++) {
+      if (Math.abs(d[i]) < 1e-9) {
+        m[i] = 0;
+        m[i + 1] = 0;
+      } else {
+        const alpha = m[i] / d[i];
+        const beta = m[i + 1] / d[i];
+        const s = alpha * alpha + beta * beta;
+        if (s > 9) {
+          const tau = 3 / Math.sqrt(s);
+          m[i] = tau * alpha * d[i];
+          m[i + 1] = tau * beta * d[i];
+        }
+      }
+    }
+
+    const loY = typeof minY === 'number' ? minY : -Infinity;
+    const hiY = typeof maxY === 'number' ? maxY : Infinity;
+    let path = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+    for (let i = 0; i < n - 1; i++) {
+      const h = dx[i];
+      const cp1x = pts[i].x + h / 3;
+      const cp1y = clampVal(pts[i].y + (m[i] * h) / 3, loY, hiY);
+      const cp2x = pts[i + 1].x - h / 3;
+      const cp2y = clampVal(pts[i + 1].y - (m[i + 1] * h) / 3, loY, hiY);
+      path += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${pts[i + 1].x.toFixed(1)} ${pts[i + 1].y.toFixed(1)}`;
+    }
+    return path;
   }
 
   function calculateYScale(maxVal) {
@@ -542,96 +626,21 @@
     const growth = (pLatest.prompt_tokens || 0) - (pStart.prompt_tokens || 0);
 
     const maxTok = Math.max(...curve.map((c) => c.prompt_tokens || 0), 100);
-    const { yMax, ticks } = calculateYScale(maxTok);
-
-    const svgW = 340;
-    const svgH = 150;
-    const padL = 46;
-    const padR = 14;
-    const padT = 18;
-    const padB = 26;
-    const plotW = svgW - padL - padR;
-    const plotH = svgH - padT - padB;
-    const plotBottom = padT + plotH;
-    const plotRight = padL + plotW;
-
-    const pts = curve.map((turn, i) => {
-      const x = N > 1 ? padL + (i / (N - 1)) * plotW : padL + plotW / 2;
-      const y = plotBottom - Math.min(plotH, Math.max(0, ((turn.prompt_tokens || 0) / yMax) * plotH));
-      return { x, y, turn, i };
-    });
-
-    const gridLinesHtml = ticks.map((v) => {
-      const y = plotBottom - (v / yMax) * plotH;
-      return `
-        <line x1="${padL}" y1="${y.toFixed(1)}" x2="${plotRight}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-dasharray="3,3" opacity="0.6"/>
-        <text x="${padL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="var(--dim)" font-size="9" class="num">${fmtTok(v)}</text>
-      `;
-    }).join('');
-
-    const axisBottomHtml = `<line x1="${padL}" y1="${plotBottom}" x2="${plotRight}" y2="${plotBottom}" stroke="var(--line)"/>`;
-
-    let xTickIndices = [];
-    if (N <= 6) {
-      xTickIndices = curve.map((_, idx) => idx);
-    } else {
-      xTickIndices = [0, Math.floor(N * 0.25), Math.floor(N * 0.5), Math.floor(N * 0.75), N - 1];
-      xTickIndices = [...new Set(xTickIndices)];
-    }
-    const xTicksHtml = xTickIndices.map((idx) => {
-      const pt = pts[idx];
-      return `
-        <line x1="${pt.x.toFixed(1)}" y1="${plotBottom}" x2="${pt.x.toFixed(1)}" y2="${plotBottom + 3}" stroke="var(--line)"/>
-        <text x="${pt.x.toFixed(1)}" y="${plotBottom + 13}" text-anchor="middle" fill="var(--dim)" font-size="9" class="num">#${pt.turn.step}</text>
-      `;
-    }).join('');
-
-    let pathHtml = '';
-    if (N === 1) {
-      pathHtml = `
-        <line x1="${padL}" y1="${pts[0].y.toFixed(1)}" x2="${plotRight}" y2="${pts[0].y.toFixed(1)}" stroke="var(--c-agent)" stroke-width="1.8" stroke-dasharray="4,4"/>
-        <circle cx="${pts[0].x.toFixed(1)}" cy="${pts[0].y.toFixed(1)}" r="4" fill="var(--c-agent)" stroke="var(--surface)" stroke-width="1.5"/>
-      `;
-    } else {
-      const lineD = makeSmoothPath(pts);
-      const areaD = `${lineD} L ${pts[N - 1].x.toFixed(1)} ${plotBottom} L ${pts[0].x.toFixed(1)} ${plotBottom} Z`;
-      pathHtml = `
-        <path d="${areaD}" fill="url(#growth-area-grad)"/>
-        <path d="${lineD}" fill="none" stroke="var(--c-agent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      `;
-    }
-
-    const dotsHtml = pts.map((pt) => {
-      const isUser = Boolean(pt.turn.user_prompt);
-      const isDrop = pt.turn.context_delta < 0;
-      if (N > 32 && !isUser && !isDrop && pt.i !== 0 && pt.i !== N - 1) {
-        return '';
-      }
-      const r = isUser ? 3.5 : (isDrop ? 3.2 : 2.2);
-      const color = isDrop ? '#81c995' : (isUser ? 'var(--c-user)' : 'var(--c-agent)');
-      return `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${r}" fill="${color}" stroke="var(--surface)" stroke-width="1.2"/>`;
-    }).join('');
-
-    const hasDrops = pts.some((p) => p.turn.context_delta < 0);
+    const { yMax } = calculateYScale(maxTok);
+    const hasDrops = curve.some((c) => c.context_delta < 0);
     const budget = Number(r.request_budget_tokens) || 0;
-    let budgetLineHtml = '';
     let budgetLegendHtml = '';
     if (budget > 0 && budget <= yMax) {
-      const budgetY = plotBottom - (budget / yMax) * plotH;
-      budgetLineHtml = `
-        <line x1="${padL}" y1="${budgetY.toFixed(1)}" x2="${plotRight}" y2="${budgetY.toFixed(1)}" stroke="#f28b82" stroke-width="1.2" stroke-dasharray="3,2" opacity="0.85"/>
-        <text x="${plotRight}" y="${(budgetY - 3).toFixed(1)}" text-anchor="end" fill="#f28b82" font-size="8.5" font-weight="500">Budget ${fmtTok(budget)}</text>
-      `;
       budgetLegendHtml = `
         <span class="curve-legend-item">
           <svg width="16" height="8" viewBox="0 0 16 8" style="flex:none;">
             <line x1="0" y1="4" x2="16" y2="4" stroke="#f28b82" stroke-width="1.6" stroke-dasharray="3,2"/>
           </svg>
-          <span>Budget (${fmtTok(budget)})</span>
+          <span>Budget (${fmtAxisTok(budget)})</span>
         </span>
       `;
     } else if (budget > 0) {
-      budgetLegendHtml = `<span class="dim num">Budget ${fmtTok(budget)}</span>`;
+      budgetLegendHtml = `<span class="dim num">Budget ${fmtAxisTok(budget)}</span>`;
     }
 
     return `
@@ -650,28 +659,7 @@
               <span class="dim">(${growth >= 0 ? '+' : ''}${fmtTok(growth)})</span>
             </div>
           </div>
-          <div class="curve-chart-wrap" id="curve-wrap">
-            <svg class="curve-svg" viewBox="0 0 ${svgW} ${svgH}" role="img" aria-label="Context growth curve showing tokens per turn">
-              <defs>
-                <linearGradient id="growth-area-grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stop-color="var(--c-agent)" stop-opacity="0.32"/>
-                  <stop offset="75%" stop-color="var(--c-agent)" stop-opacity="0.06"/>
-                  <stop offset="100%" stop-color="var(--c-agent)" stop-opacity="0"/>
-                </linearGradient>
-              </defs>
-              ${gridLinesHtml}
-              ${budgetLineHtml}
-              ${axisBottomHtml}
-              ${xTicksHtml}
-              <text x="${padL}" y="11" fill="var(--dim)" font-size="9.5" font-weight="500">context (tokens)</text>
-              <text x="${plotRight}" y="146" text-anchor="end" fill="var(--dim)" font-size="9.5" font-weight="500">turn →</text>
-              ${pathHtml}
-              ${dotsHtml}
-              <line id="curve-crosshair" x1="0" y1="${padT}" x2="0" y2="${plotBottom}" stroke="var(--dim)" stroke-width="1" stroke-dasharray="2,2" opacity="0" pointer-events="none"/>
-              <circle id="curve-hover-dot" cx="0" cy="0" r="4.5" fill="var(--c-agent)" stroke="#ffffff" stroke-width="1.5" opacity="0" pointer-events="none"/>
-              <rect id="curve-hit-area" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent" style="cursor:crosshair;"/>
-            </svg>
-          </div>
+          <div class="curve-chart-wrap" id="curve-wrap"></div>
           <div class="curve-tooltip" id="curve-tooltip-bar">
             <div class="curve-tooltip-main num">
               <span class="dim">Peak: <strong>${fmtTok(maxTok)}</strong> · Net: <strong>${growth >= 0 ? '+' : ''}${fmtTok(growth)}</strong></span>
@@ -707,21 +695,31 @@
       </section>`;
   }
 
-  function setupGrowthCurve(r) {
+  function renderGrowthCurveChart(wrap, r) {
     const t = r.telemetry;
     if (!t || !Array.isArray(t.turns_curve) || !t.turns_curve.length) return;
     const curve = t.turns_curve;
     const N = curve.length;
+    const growth = (curve[N - 1].prompt_tokens || 0) - (curve[0].prompt_tokens || 0);
     const maxTok = Math.max(...curve.map((c) => c.prompt_tokens || 0), 100);
-    const { yMax } = calculateYScale(maxTok);
+    const { yMax, ticks } = calculateYScale(maxTok);
+    const showTurnModel = Boolean(r.orchestrator?.active || new Set(curve.map((c) => c.model).filter(Boolean)).size > 1);
 
-    const padL = 46;
+    const measuredW = wrap.getBoundingClientRect().width || wrap.clientWidth || 340;
+    const svgW = Math.max(220, Math.round(measuredW));
+    const svgH = 164;
+    const maxTickLabel = ticks.reduce((longest, v) => {
+      const lbl = fmtAxisTok(v);
+      return lbl.length > longest.length ? lbl : longest;
+    }, '');
+    const padL = Math.max(36, Math.min(52, maxTickLabel.length * 6 + 14));
     const padR = 14;
-    const padT = 18;
+    const padT = 22;
     const padB = 26;
-    const plotW = 340 - padL - padR;
-    const plotH = 150 - padT - padB;
+    const plotW = Math.max(80, svgW - padL - padR);
+    const plotH = svgH - padT - padB;
     const plotBottom = padT + plotH;
+    const plotRight = padL + plotW;
 
     const pts = curve.map((turn, i) => {
       const x = N > 1 ? padL + (i / (N - 1)) * plotW : padL + plotW / 2;
@@ -729,14 +727,130 @@
       return { x, y, turn, i };
     });
 
+    const gridLinesHtml = ticks.map((v) => {
+      const y = plotBottom - (v / yMax) * plotH;
+      return `
+        <line x1="${padL}" y1="${y.toFixed(1)}" x2="${plotRight}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-dasharray="3,3" opacity="0.6"/>
+        <text x="${padL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="var(--dim)" font-size="9.5" class="num">${fmtAxisTok(v)}</text>
+      `;
+    }).join('');
+
+    const axisBottomHtml = `<line x1="${padL}" y1="${plotBottom}" x2="${plotRight}" y2="${plotBottom}" stroke="var(--line)"/>`;
+
+    const maxTicks = Math.max(2, Math.min(6, Math.floor(plotW / 56) + 1));
+    let xTickIndices = [];
+    if (N <= maxTicks) {
+      xTickIndices = curve.map((_, idx) => idx);
+    } else {
+      const raw = [];
+      for (let k = 0; k < maxTicks; k++) {
+        raw.push(Math.round((k / (maxTicks - 1)) * (N - 1)));
+      }
+      const deduped = [...new Set(raw)];
+      const minGapPx = 38;
+      for (let j = 0; j < deduped.length; j++) {
+        const idx = deduped[j];
+        if (j === 0 || j === deduped.length - 1) {
+          xTickIndices.push(idx);
+        } else {
+          const prevIdx = xTickIndices[xTickIndices.length - 1];
+          if (pts[idx].x - pts[prevIdx].x >= minGapPx && pts[N - 1].x - pts[idx].x >= minGapPx) {
+            xTickIndices.push(idx);
+          }
+        }
+      }
+    }
+
+    const xTicksHtml = xTickIndices.map((idx) => {
+      const pt = pts[idx];
+      let anchor = 'middle';
+      if (N > 1) {
+        if (idx === 0) anchor = 'start';
+        else if (idx === N - 1) anchor = 'end';
+      }
+      return `
+        <line x1="${pt.x.toFixed(1)}" y1="${plotBottom}" x2="${pt.x.toFixed(1)}" y2="${plotBottom + 3}" stroke="var(--line)"/>
+        <text x="${pt.x.toFixed(1)}" y="${plotBottom + 14}" text-anchor="${anchor}" fill="var(--dim)" font-size="9.5" class="num">#${pt.turn.step}</text>
+      `;
+    }).join('');
+
+    let pathHtml = '';
+    if (N === 1) {
+      pathHtml = `
+        <line x1="${padL}" y1="${pts[0].y.toFixed(1)}" x2="${plotRight}" y2="${pts[0].y.toFixed(1)}" stroke="var(--c-agent)" stroke-width="1.8" stroke-dasharray="4,4"/>
+      `;
+    } else {
+      const lineD = makeSmoothPath(pts, padT, plotBottom);
+      const areaD = `${lineD} L ${pts[N - 1].x.toFixed(1)} ${plotBottom} L ${pts[0].x.toFixed(1)} ${plotBottom} Z`;
+      pathHtml = `
+        <path d="${areaD}" fill="url(#growth-area-grad)"/>
+        <path d="${lineD}" fill="none" stroke="var(--c-agent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      `;
+    }
+
+    const dotsHtml = pts.map((pt) => {
+      const isUser = Boolean(pt.turn.user_prompt);
+      const isDrop = pt.turn.context_delta < 0;
+      if (N > 32 && !isUser && !isDrop && pt.i !== 0 && pt.i !== N - 1) {
+        return '';
+      }
+      const radius = N === 1 ? 4 : (isUser ? 3.5 : (isDrop ? 3.2 : 2.2));
+      const color = isDrop ? '#81c995' : (isUser ? 'var(--c-user)' : 'var(--c-agent)');
+      return `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${radius}" fill="${color}" stroke="var(--surface)" stroke-width="1.2"/>`;
+    }).join('');
+
+    const budget = Number(r.request_budget_tokens) || 0;
+    let budgetLineHtml = '';
+    if (budget > 0 && budget <= yMax) {
+      const budgetY = plotBottom - (budget / yMax) * plotH;
+      const budgetLabelY = Math.max(padT + 10, budgetY - 4);
+      budgetLineHtml = `
+        <line x1="${padL}" y1="${budgetY.toFixed(1)}" x2="${plotRight}" y2="${budgetY.toFixed(1)}" stroke="#f28b82" stroke-width="1.2" stroke-dasharray="3,2" opacity="0.85"/>
+        <text x="${plotRight}" y="${budgetLabelY.toFixed(1)}" text-anchor="end" fill="#f28b82" font-size="9" font-weight="500">Budget ${fmtAxisTok(budget)}</text>
+      `;
+    }
+
+    wrap.innerHTML = `
+      <svg class="curve-svg" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" role="img" aria-label="Context growth curve showing tokens per turn">
+        <defs>
+          <linearGradient id="growth-area-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="var(--c-agent)" stop-opacity="0.32"/>
+            <stop offset="75%" stop-color="var(--c-agent)" stop-opacity="0.06"/>
+            <stop offset="100%" stop-color="var(--c-agent)" stop-opacity="0"/>
+          </linearGradient>
+          <clipPath id="curve-plot-clip">
+            <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}"/>
+          </clipPath>
+        </defs>
+        ${gridLinesHtml}
+        ${budgetLineHtml}
+        ${axisBottomHtml}
+        ${xTicksHtml}
+        <text x="${padL}" y="12" fill="var(--dim)" font-size="10" font-weight="500">context (tokens)</text>
+        <text x="${plotRight}" y="12" text-anchor="end" fill="var(--dim)" font-size="10" font-weight="500">turns →</text>
+        <g clip-path="url(#curve-plot-clip)">${pathHtml}</g>
+        ${dotsHtml}
+        <line id="curve-crosshair" x1="0" y1="${padT}" x2="0" y2="${plotBottom}" stroke="var(--dim)" stroke-width="1" stroke-dasharray="2,2" opacity="0" pointer-events="none"/>
+        <circle id="curve-hover-dot" cx="0" cy="0" r="4.5" fill="var(--c-agent)" stroke="#ffffff" stroke-width="1.5" opacity="0" pointer-events="none"/>
+        <rect id="curve-hit-area" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent" style="cursor:crosshair;"/>
+      </svg>
+    `;
+
     const hitArea = document.getElementById('curve-hit-area');
     const crosshair = document.getElementById('curve-crosshair');
     const hoverDot = document.getElementById('curve-hover-dot');
     const tooltipBar = document.getElementById('curve-tooltip-bar');
     if (!hitArea || !crosshair || !hoverDot || !tooltipBar) return;
 
+    const defaultTooltipHtml = `
+      <div class="curve-tooltip-main num">
+        <span class="dim">Peak: <strong>${fmtTok(maxTok)}</strong> · Net: <strong>${growth >= 0 ? '+' : ''}${fmtTok(growth)}</strong></span>
+      </div>
+    `;
+
     function findClosest(e) {
       const rect = hitArea.getBoundingClientRect();
+      if (!rect.width) return pts[0];
       const relX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const targetSvgX = padL + relX * plotW;
       let best = pts[0];
@@ -772,6 +886,7 @@
       const deltaStr = (delta >= 0 ? '+' : '') + fmtTok(delta);
       const userTag = pt.turn.user_prompt ? '<span class="turn-tag user">user</span>' : '';
       const toolTag = pt.turn.tool_count > 0 ? `<span class="turn-tag">${pt.turn.tool_count}t</span>` : '';
+      const modelTag = (showTurnModel && pt.turn.model) ? `<span class="turn-tag model" title="${esc(pt.turn.model)}">${esc(pt.turn.model)}</span>` : '';
       const snippet = pt.turn.user_prompt
         ? esc(pt.turn.user_prompt)
         : (pt.turn.tool_summary ? esc(pt.turn.tool_summary) : (pt.turn.timestamp ? esc(pt.turn.timestamp) : ''));
@@ -784,6 +899,7 @@
           <span class="dim">· cache ${pt.turn.cache_hit_pct}%</span>
           ${userTag}
           ${toolTag}
+          ${modelTag}
           ${snippet ? `<span class="curve-tooltip-preview dim">${snippet}</span>` : ''}
         </div>
       `;
@@ -792,11 +908,7 @@
     hitArea.addEventListener('pointerleave', () => {
       crosshair.style.opacity = '0';
       hoverDot.style.opacity = '0';
-      tooltipBar.innerHTML = `
-        <div class="curve-tooltip-main num">
-          <span class="dim">Peak: <strong>${fmtTok(maxTok)}</strong> · Net: <strong>${growth >= 0 ? '+' : ''}${fmtTok(growth)}</strong></span>
-        </div>
-      `;
+      tooltipBar.innerHTML = defaultTooltipHtml;
     });
 
     hitArea.addEventListener('click', (e) => {
@@ -818,6 +930,34 @@
         }
       }, 50);
     });
+  }
+
+  function setupGrowthCurve(r) {
+    if (curveResizeObserver) {
+      curveResizeObserver.disconnect();
+      curveResizeObserver = null;
+    }
+    const wrap = document.getElementById('curve-wrap');
+    if (!wrap) return;
+    renderGrowthCurveChart(wrap, r);
+
+    if (typeof ResizeObserver !== 'undefined') {
+      let lastWidth = Math.round(wrap.getBoundingClientRect().width || wrap.clientWidth || 0);
+      let rafId = 0;
+      curveResizeObserver = new ResizeObserver((entries) => {
+        const w = Math.round((entries[0]?.contentRect?.width) || wrap.clientWidth || 0);
+        if (!w || Math.abs(w - lastWidth) < 2) return;
+        lastWidth = w;
+        if (rafId) cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          if (document.body.contains(wrap)) {
+            renderGrowthCurveChart(wrap, r);
+          }
+        });
+      });
+      curveResizeObserver.observe(wrap);
+    }
   }
 
   function telemetrySection(r) {
@@ -901,7 +1041,7 @@
     return `
       <div class="turn-detail">
         <div class="td-meta">
-          <span class="num">Turn #${tr.step}${tr.traj_step !== undefined ? ` · Step #${tr.traj_step}` : ''}${tr.timestamp ? ` · ${esc(tr.timestamp)}` : ''}</span>
+          <span class="num">Turn #${tr.step}${tr.traj_step !== undefined ? ` · Step #${tr.traj_step}` : ''}${tr.timestamp ? ` · ${esc(tr.timestamp)}` : ''}${tr.model ? ` · ${esc(tr.model)}` : ''}</span>
           <span class="num">Delta ${deltaStr}${tr.trace_id ? ` · ${esc(tr.trace_id.slice(0, 12))}` : ''}</span>
         </div>
         <div class="td-cards">
@@ -935,11 +1075,43 @@
       </div>`;
   }
 
+  function headerModelHtml(r) {
+    const orch = r.orchestrator;
+    if (!orch || !orch.active) {
+      return `<div class="model"><span class="live on" title="Live"></span>${esc(r.model)}</div>`;
+    }
+    const isExec = orch.phase === 'execute';
+    const phaseLabel = isExec ? 'Execute' : 'Plan';
+    const title = orch.planner_model && orch.planner_model.startsWith('Orchestrator')
+      ? orch.planner_model
+      : 'Orchestrator';
+    const parts = [];
+    if (orch.planner_model) {
+      parts.push(`<span class="${!isExec ? 'active-role' : ''}">Plan: ${esc(orch.planner_model)}</span>`);
+    }
+    if (orch.execution_model) {
+      parts.push(`<span class="${isExec ? 'active-role' : ''}">Exec: ${esc(orch.execution_model)}</span>`);
+    }
+    const pairHtml = parts.length
+      ? `<div class="orch-pair">${parts.join('<span>→</span>')}</div>`
+      : '';
+    return `
+      <div class="model-wrap">
+        <div class="model">
+          <span class="live on" title="Live"></span>
+          <span>${esc(title)}</span>
+          <span class="orch-badge ${isExec ? 'exec' : ''}">${phaseLabel}</span>
+        </div>
+        ${pairHtml}
+      </div>`;
+  }
+
   function turnsSection(r) {
     const t = r.telemetry;
     if (!t || !Array.isArray(t.recent_turns) || !t.recent_turns.length) return '';
     const allTurns = t.recent_turns;
     const visibleTurns = showAllTurns ? allTurns : allTurns.slice(0, 12);
+    const showTurnModels = Boolean(r.orchestrator?.active || new Set(allTurns.map((tr) => tr.model).filter(Boolean)).size > 1);
     const toggleBtn = allTurns.length > 12
       ? `<button type="button" id="toggle-turns-btn" style="padding:1px 6px;font-size:10.5px;">${showAllTurns ? 'Recent 12' : `All ${allTurns.length}`}</button>`
       : '';
@@ -947,6 +1119,7 @@
     const turnsHtml = visibleTurns.map((tr) => {
       const isOpen = selectedTurnStep === tr.step;
       const toolCount = Array.isArray(tr.tools) ? tr.tools.length : 0;
+      const modelTag = (showTurnModels && tr.model) ? `<span class="turn-tag model" title="${esc(tr.model)}">${esc(tr.model)}</span>` : '';
       return `
         <details class="turn-item" name="turn-inspector" data-step="${tr.step}" ${isOpen ? 'open' : ''}>
           <summary class="turn-summary" title="Turn #${tr.step}">
@@ -956,6 +1129,7 @@
               <span>${fmtTok(tr.prompt_tokens)} <span class="dim">(${tr.cache_hit_pct}%)</span></span>
               ${tr.user_prompt ? '<span class="turn-tag user">user</span>' : ''}
               ${toolCount > 0 ? `<span class="turn-tag">${toolCount}t</span>` : ''}
+              ${modelTag}
             </span>
             <span class="num" style="text-align:right">${fmtTok(tr.output_tokens)}<span class="dim">/${fmtTok(tr.thinking_tokens)}</span></span>
             <span class="num dim" style="text-align:right">${fmtSec(tr.ttft_ms)}</span>
@@ -979,15 +1153,24 @@
     const scrollY = window.scrollY;
     const limit = r.limit_tokens;
     const cid = r.conversation_id || initialConversationId;
+    const pctDash = Math.min(100, Math.max(1, Number(r.used_pct) || 0)).toFixed(1);
+    const pctRingHtml = limit ? `
+      <span class="pct-wrap" title="${r.used_pct.toFixed(1)}% of context window">
+        <svg width="14" height="14" viewBox="0 0 36 36" style="transform: rotate(-90deg); flex: none;" aria-hidden="true">
+          <circle cx="18" cy="18" r="14.5" fill="none" stroke="currentColor" stroke-opacity="0.22" stroke-width="3.6"></circle>
+          <circle cx="18" cy="18" r="14.5" fill="none" stroke="${ringColor(r.used_pct)}" stroke-width="3.8" stroke-dasharray="${pctDash} 100" stroke-linecap="round" pathLength="100"></circle>
+        </svg>
+        <span class="pct num">${r.used_pct.toFixed(1)}%</span>
+      </span>` : '';
     main.innerHTML = `
       <div class="top">
-        <div class="model"><span class="live on" title="Live"></span>${esc(r.model)}</div>
+        ${headerModelHtml(r)}
         <button id="copy" title="Copy report">Copy as text</button>
       </div>
       <div class="usage">
         <span class="big num">${fmtTok(r.used_tokens)}</span>
         <span class="of">/ ${limit ? fmtTok(limit) : 'Unknown'} tokens</span>
-        ${limit ? `<span class="pct num">${r.used_pct.toFixed(1)}%</span>` : ''}
+        ${pctRingHtml}
       </div>
       ${grid(r)}
       ${categories(r)}
@@ -1029,6 +1212,10 @@
   }
 
   function showMessage(text) {
+    if (curveResizeObserver) {
+      curveResizeObserver.disconnect();
+      curveResizeObserver = null;
+    }
     report = null;
     lastJson = '';
     main.innerHTML = `<p class="empty">${esc(text)}</p>`;

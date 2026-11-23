@@ -69,10 +69,24 @@ class ConversationDB:
         self.n += 1
 
     def generation(self, groups: list[bytes], max_context: int = 1_000_000, usage: bytes = b"", checkpoint_index: int = -1,
-                   model: str = "test-model", display_name: str = "Test Model"):
+                   model: str = "test-model", display_name: str = "Test Model", model_enum: int = 0,
+                   exec_model_enum: int = 0, response_model: str = ""):
         cwm = m(f(1, 0), f(3, m(*[f(1, g) for g in groups])), f(4, max_context))
-        chat = m(f(4, usage), f(9, m(f(2, checkpoint_index), f(10, cwm))), f(21, display_name) if display_name else b"")
-        data = m(f(1, chat), f(3, f(28, model)))
+        chat_parts = [f(4, usage), f(9, m(f(2, checkpoint_index), f(10, cwm)))]
+        if model_enum:
+            chat_parts.append(f(3, model_enum))
+        if response_model:
+            chat_parts.append(f(19, response_model))
+        if display_name:
+            chat_parts.append(f(21, display_name))
+        planner_parts = []
+        if model_enum:
+            planner_parts.append(f(1, model_enum))
+        if model:
+            planner_parts.append(f(28, model))
+        if exec_model_enum:
+            planner_parts.append(f(60, f(1, exec_model_enum)))
+        data = m(f(1, m(*chat_parts)), f(3, m(*planner_parts)))
         self.conn.execute("INSERT INTO gen_metadata (idx, data) VALUES ((SELECT COUNT(*) FROM gen_metadata), ?)", (data,))
 
     def close(self):
@@ -260,6 +274,22 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(curve[1]["prompt_tokens"], 1500)
         self.assertEqual(curve[1]["context_delta"], 500)
 
+    def test_telemetry_curve_skips_zero_token_errors(self):
+        self.basic_steps()
+        self.db.generation([group(7, 300, ("0: USER_INPUT", 300))], usage=usage(input_tokens=1000, output=150))
+        self.db.generation([group(7, 300, ("0: USER_INPUT", 300))], usage=usage(input_tokens=0, output=0))
+        self.db.generation([group(7, 500, ("0: USER_INPUT", 300), ("1: AGENT", 200))], usage=usage(input_tokens=1500, output=200))
+        r = self.report()
+        tel = r.get("telemetry", {})
+        self.assertEqual(tel["total_calls"], 3)
+        self.assertEqual(len(tel["recent_turns"]), 3)
+        curve = tel.get("turns_curve", [])
+        self.assertEqual(len(curve), 2)
+        self.assertEqual([c["step"] for c in curve], [0, 2])
+        self.assertEqual(curve[0]["prompt_tokens"], 1000)
+        self.assertEqual(curve[1]["prompt_tokens"], 1500)
+        self.assertEqual(curve[1]["context_delta"], 500)
+
     # --- files ---
 
     def test_file_sections(self):
@@ -331,6 +361,67 @@ class ReportTest(unittest.TestCase):
         self.db.generation([group(7, 300, ("0: USER_INPUT", 300))], max_context=256_000, model="new-model-x", display_name="")
         r = self.report()
         self.assertEqual((r["model"], r["limit_tokens"]), ("New Model X", 256_000))
+        self.assertIsNone(r["orchestrator"])
+
+    def test_orchestrator_preset_model_and_phase(self):
+        self.basic_steps()
+        self.db.generation(
+            [group(7, 300, ("0: USER_INPUT", 300))],
+            model="gemini-pro-orchestrator-neon",
+            display_name="Orchestrator (Neon)",
+            model_enum=1537,
+            exec_model_enum=1669,
+            response_model="gemini-pro-orchestrator-neon",
+        )
+        catalog = self.home / "catalog.json"
+        catalog.write_text(json.dumps({
+            "gemini-pro-orchestrator-neon": {
+                "maxTokens": 1_048_576,
+                "displayName": "Orchestrator (Neon)",
+                "model": "MODEL_PLACEHOLDER_M537",
+                "executionModel": "MODEL_PLACEHOLDER_M669",
+            },
+            "gemini-flash-worker-agy": {
+                "maxTokens": 1_048_576,
+                "displayName": "Gemini 4 Hydrogen (Orchestrator)",
+                "model": "MODEL_PLACEHOLDER_M669",
+            },
+        }))
+        r = self.report("--model-catalog", str(catalog))
+        self.assertEqual(r["model"], "Orchestrator (Neon)")
+        self.assertEqual(r["limit_tokens"], 1_048_576)
+        self.assertIsNotNone(r["orchestrator"])
+        self.assertTrue(r["orchestrator"]["active"])
+        self.assertEqual(r["orchestrator"]["phase"], "plan")
+        self.assertEqual(r["orchestrator"]["planner_model"], "Orchestrator (Neon)")
+        self.assertEqual(r["orchestrator"]["execution_model"], "Gemini 4 Hydrogen (Orchestrator)")
+
+    def test_orchestrator_dual_model_plan_and_execute_phases(self):
+        self.basic_steps()
+        self.db.generation(
+            [group(7, 300, ("0: USER_INPUT", 300))],
+            usage=usage(input_tokens=1000, output=100),
+            model="gemini-4-neon-high",
+            display_name="Gemini 4 Neon (High)",
+            model_enum=1532,
+            exec_model_enum=1528,
+        )
+        self.db.generation(
+            [group(7, 500, ("0: USER_INPUT", 300), ("1: AGENT", 200))],
+            usage=usage(input_tokens=1400, output=120),
+            model="gemini-4-hydrogen-xhigh",
+            display_name="Gemini 4 Hydrogen (XHigh)",
+            model_enum=1528,
+            exec_model_enum=1528,
+        )
+        r = self.report()
+        orch = r["orchestrator"]
+        self.assertIsNotNone(orch)
+        self.assertTrue(orch["active"])
+        self.assertEqual(orch["phase"], "execute")
+        self.assertEqual(orch["planner_model"], "Gemini 4 Neon (High)")
+        self.assertEqual(orch["execution_model"], "Gemini 4 Hydrogen (XHigh)")
+        self.assertEqual(r["model"], "Orchestrator · Gemini 4 Neon (High)")
 
     # --- rendering ---
 
@@ -363,6 +454,17 @@ class FormatTest(unittest.TestCase):
             "gemini-3.8-flash-low": "Gemini 3.8 Flash (Low)",
             "claude-opus-5-5-high": "Claude Opus 5.5 (High)",
             "gpt-oss-120b-medium": "GPT-OSS 120B (Medium)",
+        }
+        for slug, label in cases.items():
+            self.assertEqual(context_report.model_label(slug), label)
+
+    def test_model_label_orchestrator_and_xhigh(self):
+        cases = {
+            "gemini-pro-orchestrator-neon": "Orchestrator (Neon)",
+            "gemini-pro-orchestrator-g1-pro": "Orchestrator (Argon)",
+            "gemini-flash-worker-agy": "Gemini 4 Hydrogen (Orchestrator)",
+            "gemini-4-neon-xhigh": "Gemini 4 Neon (XHigh)",
+            "gemini-4-hydrogen-tiered-high": "Gemini 4 Hydrogen (High)",
         }
         for slug, label in cases.items():
             self.assertEqual(context_report.model_label(slug), label)

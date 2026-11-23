@@ -1,6 +1,9 @@
 {
   "command": "node",
   "args": ["main.mjs"],
+  "env": {
+    "AGY_CDP_PORT": "9222"
+  },
   "restart_policy": "always",
   "display_name": "Context Usage",
   "description": "Live context window usage for the open conversation, computed like the agy CLI's /context.",

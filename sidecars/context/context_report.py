@@ -794,8 +794,13 @@ def collect_telemetry(db_path: Path, steps: list[Step] | None = None) -> dict:
         inp = u.int(2)
         cache = u.int(5)
         prompt_tok = inp + cache
-        context_delta = prompt_tok - prev_prompt_tok if prev_prompt_tok > 0 else prompt_tok
-        prev_prompt_tok = prompt_tok
+        if prompt_tok > 0:
+            context_delta = prompt_tok - prev_prompt_tok if prev_prompt_tok > 0 else prompt_tok
+            prev_prompt_tok = prompt_tok
+        else:
+            context_delta = 0
+
+        turn_model = chat.str(21) or (model_label(chat.str(19)) if chat.str(19) else "")
 
         out = u.int(3)
         think = u.int(9)
@@ -875,6 +880,7 @@ def collect_telemetry(db_path: Path, steps: list[Step] | None = None) -> dict:
             "step": idx,
             "traj_step": traj_step,
             "timestamp": timestamp,
+            "model": turn_model,
             "input_tokens": inp,
             "cache_read_tokens": cache,
             "prompt_tokens": prompt_tok,
@@ -930,6 +936,7 @@ def collect_telemetry(db_path: Path, steps: list[Step] | None = None) -> dict:
             {
                 "step": t["step"],
                 "traj_step": t["traj_step"],
+                "model": t["model"],
                 "prompt_tokens": t["prompt_tokens"],
                 "context_delta": t["context_delta"],
                 "cache_read_tokens": t["cache_read_tokens"],
@@ -943,6 +950,7 @@ def collect_telemetry(db_path: Path, steps: list[Step] | None = None) -> dict:
                 "tool_summary": ", ".join(x["name"] for x in t["tools"][:2]),
             }
             for t in turns
+            if t["prompt_tokens"] > 0
         ],
     }
 
@@ -970,8 +978,58 @@ NATIVE_CONTEXT_WINDOWS = [
     ("gemini-", 1_048_576),
 ]
 
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_LABELS = {
+    "minimal": "Minimal",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "XHigh",
+    "max": "Max",
+}
 WORD_LABELS = {"gpt": "GPT", "oss": "OSS"}
+MODEL_DISPLAY_OVERRIDES = {
+    "gemini-pro-orchestrator-neon": "Orchestrator (Neon)",
+    "gemini-pro-orchestrator-g1-pro": "Orchestrator (Argon)",
+    "gemini-flash-worker-agy": "Gemini 4 Hydrogen (Orchestrator)",
+    "gemini-4-carbon-disabled": "Gemini 4 Carbon",
+}
+PLACEHOLDER_ENUM_FALLBACK = {
+    1525: "Gemini 4 Hydrogen (High)",
+    1526: "Gemini 4 Hydrogen (Medium)",
+    1527: "Gemini 4 Hydrogen (Low)",
+    1528: "Gemini 4 Hydrogen (XHigh)",
+    1530: "Gemini 4 Hydrogen (High)",
+    1531: "Gemini 4 Hydrogen (XHigh)",
+    1532: "Gemini 4 Neon (High)",
+    1533: "Gemini 4 Neon (Medium)",
+    1534: "Gemini 4 Neon (Low)",
+    1535: "Gemini 4 Neon (XHigh)",
+    1537: "Orchestrator (Neon)",
+    1668: "Orchestrator (Argon)",
+    1669: "Gemini 4 Hydrogen (Orchestrator)",
+    1670: "Gemini 4 Carbon",
+}
+
+
+def placeholder_enum_int(enum_str: str) -> int:
+    m = re.fullmatch(r"MODEL_PLACEHOLDER_M(\d+)", (enum_str or "").strip())
+    return 1000 + int(m.group(1)) if m else 0
+
+
+def build_enum_lookup(catalog: dict | None) -> dict[int, str]:
+    lookup = dict(PLACEHOLDER_ENUM_FALLBACK)
+    for slug, entry in (catalog or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        enum_id = placeholder_enum_int(entry.get("model", ""))
+        if not enum_id:
+            continue
+        disp = (entry.get("displayName") or "").strip()
+        if disp:
+            lookup[enum_id] = disp
+        elif enum_id not in lookup:
+            lookup[enum_id] = model_label(slug)
+    return lookup
 
 
 def model_id(gen: Msg | None) -> str:
@@ -981,10 +1039,14 @@ def model_id(gen: Msg | None) -> str:
 
 def model_label(slug: str) -> str:
     """Catalog-style label from a model ID: gemini-3.8-flash-medium -> Gemini 3.8 Flash (Medium)."""
+    if slug in MODEL_DISPLAY_OVERRIDES:
+        return MODEL_DISPLAY_OVERRIDES[slug]
     parts = slug.split("-")
-    effort = parts.pop().capitalize() if len(parts) > 1 and parts[-1] in EFFORT_LEVELS else ""
+    effort = EFFORT_LABELS[parts.pop()] if len(parts) > 1 and parts[-1] in EFFORT_LABELS else ""
     words: list[str] = []
     for p in parts:
+        if p == "tiered":
+            continue
         if p.isdigit() and words and words[-1][-1:].isdigit():
             words[-1] += "." + p  # claude-opus-5-5 -> 5.5
         elif p in WORD_LABELS:
@@ -1006,6 +1068,90 @@ def model_name(gen: Msg | None) -> str:
     if chat is not None and chat.str(19):  # response_model
         return chat.str(19)
     return "Unknown Model"
+
+
+def resolve_orchestrator(gen: Msg | None, db_path: Path | None, catalog: dict | None, base_model: str) -> dict | None:
+    """Detect Orchestrator / dual-model Plan-Execute mode and resolve planner/executor labels."""
+    if gen is None:
+        return None
+    planner = gen.msg(3)
+    chat = gen.msg(1)
+    pe_cfg = planner.msg(60) if planner is not None and planner.has(60) else None
+    exec_enum = pe_cfg.int(1) if pe_cfg is not None else 0
+    cur_enum = planner.int(1) if (planner is not None and planner.has(1)) else (chat.int(3) if chat is not None else 0)
+    slug = model_id(gen)
+    catalog_entry = (catalog or {}).get(slug) or {}
+    catalog_exec_enum = placeholder_enum_int(catalog_entry.get("executionModel", ""))
+    effective_exec_enum = exec_enum or catalog_exec_enum
+
+    is_active = (
+        exec_enum > 0
+        or slug.startswith("gemini-pro-orchestrator-")
+        or slug == "gemini-flash-worker-agy"
+        or base_model.startswith("Orchestrator")
+        or "(Orchestrator)" in base_model
+    )
+    if not is_active:
+        return None
+
+    enum_lookup = build_enum_lookup(catalog)
+    execution_model = enum_lookup.get(effective_exec_enum, "") if effective_exec_enum else ""
+    if not execution_model and effective_exec_enum and cur_enum == effective_exec_enum:
+        execution_model = base_model
+    if not execution_model and slug == "gemini-flash-worker-agy":
+        execution_model = "Gemini 4 Hydrogen (Orchestrator)"
+
+    is_execute = (
+        (effective_exec_enum > 0 and cur_enum == effective_exec_enum)
+        or slug == "gemini-flash-worker-agy"
+        or "(Orchestrator)" in base_model
+    )
+    phase = "execute" if is_execute else "plan"
+
+    planner_model = ""
+    if phase == "plan":
+        planner_model = base_model
+    elif db_path is not None and db_path.is_file():
+        uri = "file:" + db_path.as_posix() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            rows = conn.execute("SELECT data FROM gen_metadata ORDER BY idx DESC").fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            conn.close()
+        for (blob,) in rows:
+            c = Msg(blob).msg(1)
+            if c is None:
+                continue
+            c_enum = c.int(3)
+            c_resp = c.str(19)
+            if c_resp == "gemini-flash-worker-agy":
+                continue
+            if effective_exec_enum and c_enum == effective_exec_enum:
+                continue
+            candidate = c.str(21) or (enum_lookup.get(c_enum, "") if c_enum else "") or (model_label(c_resp) if c_resp else "")
+            if candidate:
+                planner_model = candidate
+                break
+
+    if planner_model.startswith("Orchestrator"):
+        display_model = planner_model
+    elif planner_model:
+        display_model = f"Orchestrator · {planner_model}"
+    elif execution_model:
+        display_model = f"Orchestrator · {execution_model}"
+    else:
+        display_model = base_model
+
+    return {
+        "active": True,
+        "phase": phase,
+        "planner_model": planner_model,
+        "execution_model": execution_model,
+        "active_model": base_model,
+        "display_model": display_model,
+    }
 
 
 def context_limit(gen: Msg | None) -> int:
@@ -1056,19 +1202,25 @@ def main():
         raise SystemExit(f"Conversation database not found: {db_path}")
 
     steps, gen = load(db_path)
-    catalog_entry = {}
+    catalog = {}
     if args.model_catalog:
         with open(args.model_catalog, encoding="utf-8") as fh:
-            catalog_entry = json.load(fh).get(model_id(gen)) or {}
+            loaded_catalog = json.load(fh)
+            if isinstance(loaded_catalog, dict):
+                catalog = loaded_catalog
+    catalog_entry = catalog.get(model_id(gen)) or {}
     limit = args.limit if args.limit > 0 else int(catalog_entry.get("maxTokens") or 0) or context_limit(gen)
     st = collect_stats(steps, gen, limit)
-    model = catalog_entry.get("displayName") or model_name(gen)
+    base_model = catalog_entry.get("displayName") or model_name(gen)
+    orch = resolve_orchestrator(gen, db_path, catalog, base_model)
+    model = orch["display_model"] if orch else base_model
     system_files = detect_system_files(os.path.expanduser("~"), args.workspace, args.app_dir)
 
     if args.json:
         print(json.dumps({
             "conversation_id": conv_id,
             "model": model,
+            "orchestrator": orch,
             "heading": stats_heading(st),
             "grid_segments": grid_segments(st),
             "checkpoint_view": checkpoint_view(st),

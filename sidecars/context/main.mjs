@@ -113,7 +113,18 @@ async function refreshCatalog() {
     const catalog = {};
     for (const [id, m] of Object.entries(models)) {
       const maxTokens = Number(m?.maxTokens) || 0;
-      if (maxTokens > 0) catalog[id] = { maxTokens, displayName: m.displayName || '' };
+      if (maxTokens > 0) {
+        const entry = { maxTokens, displayName: m.displayName || '' };
+        if (m?.model) entry.model = m.model;
+        const peRaw = m?.modelExperiments?.experiments?.['plan-execute-config']?.stringValue;
+        if (peRaw) {
+          try {
+            const pe = JSON.parse(peRaw);
+            if (pe?.executionModel) entry.executionModel = pe.executionModel;
+          } catch {}
+        }
+        catalog[id] = entry;
+      }
     }
     if (Object.keys(catalog).length) {
       mkdirSync(DATA_DIR, { recursive: true });

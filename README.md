@@ -39,23 +39,29 @@ A context window monitor and generation telemetry inspector for the **Antigravit
 
 Requires **Antigravity 2.0 Desktop** and **Python 3** on your `PATH` (`python3`, `python`, or `py`).
 
-### 1. Clone into the Antigravity plugins directory
+### 1. Clone and run the installer (enables CDP launcher + plugin)
 
 **macOS / Linux**
 ```bash
 git clone https://github.com/pigzzz104/antigravity-context-pro.git ~/.gemini/config/plugins/desktop-context
+bash ~/.gemini/config/plugins/desktop-context/scripts/install.sh
 ```
 
 **Windows (PowerShell)**
 ```powershell
 git clone https://github.com/pigzzz104/antigravity-context-pro.git "$HOME\.gemini\config\plugins\desktop-context"
+powershell -ExecutionPolicy Bypass -File "$HOME\.gemini\config\plugins\desktop-context\scripts\install.ps1"
 ```
 
-### 2. Enable the plugin
+### 2. Enable and launch
 
-1. Restart Antigravity 2.0.
-2. Open **Customizations → Installed** and enable **Context Usage**.
-3. The **Input Box Mini-Ring** will appear in the chat input bar automatically, and **Context Usage** will be available in the right-hand side panel (both via the ring popover and in the `+` New Tab menu).
+1. Quit Antigravity completely (`Cmd + Q` on macOS).
+2. Launch **Antigravity (Context Ring)** created by the installer (located in `~/Applications` on macOS, Desktop / Start Menu on Windows, or your app launcher override on Linux)—this automatically starts Antigravity with `--remote-debugging-port=9222` without modifying the signed app bundle.
+3. Open **Customizations → Installed** and enable **Context Usage**. Both the **Input Box Mini-Ring** and the **Context Usage** side panel will now work automatically.
+
+> [!NOTE]
+> **Why does the installer create `Antigravity (Context Ring)`?**
+> Starting in Antigravity v2.33.0, the desktop app disables its startup local debug port (`DevToolsActivePort`) by default, and Antigravity's official Sidecar UI API only exposes the right-hand auxiliary pane (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`). Creating a user-space launcher with `--remote-debugging-port=9222` restores the input-box mini-ring safely without breaking app code signing. To remove the launcher later, run `bash ~/.gemini/config/plugins/desktop-context/scripts/uninstall.sh`.
 
 ---
 

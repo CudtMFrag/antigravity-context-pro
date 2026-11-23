@@ -39,23 +39,29 @@
 
 依赖环境：**Antigravity 2.0 桌面端** 及系统 `PATH` 中可用的 **Python 3**（`python3`、`python` 或 `py`）。
 
-### 1. 克隆到 Antigravity 插件目录
+### 1. 克隆并运行一键安装脚本（安装插件 + 默认开启调试端口启动器）
 
 **macOS / Linux**
 ```bash
 git clone https://github.com/pigzzz104/antigravity-context-pro.git ~/.gemini/config/plugins/desktop-context
+bash ~/.gemini/config/plugins/desktop-context/scripts/install.sh
 ```
 
 **Windows (PowerShell)**
 ```powershell
 git clone https://github.com/pigzzz104/antigravity-context-pro.git "$HOME\.gemini\config\plugins\desktop-context"
+powershell -ExecutionPolicy Bypass -File "$HOME\.gemini\config\plugins\desktop-context\scripts\install.ps1"
 ```
 
-### 2. 启用插件
+### 2. 启动与启用插件
 
-1. 重启 Antigravity 2.0。
-2. 进入左侧 **Customizations → Installed**，开启 **Context Usage**。
-3. 打开任意对话，聊天框右下角即会自动显示**上下文小圆环**；点击小圆环浮窗底部的 `Open Context & Turn Inspector`（或在右侧栏 `+` 新建标签页列表中点击 `Context Usage`）即可打开侧边栏详情。
+1. 先完全退出 Antigravity（macOS 按 `Cmd + Q`）。
+2. 使用安装脚本创建的 **Antigravity (Context Ring)** 启动器打开 Antigravity（macOS 位于 `~/Applications`，Windows 位于桌面/开始菜单，Linux 已自动覆盖桌面启动器），它会在不破坏官方应用签名的前提下默认附带 `--remote-debugging-port=9222`。
+3. 进入左侧 **Customizations → Installed** 开启 **Context Usage**，聊天输入框右下角小圆环与右侧边栏面板即可同时自动生效。
+
+> [!NOTE]
+> **为什么安装脚本会创建 `Antigravity (Context Ring)` 启动器？**
+> 从 Antigravity v2.33.0 起，官方默认关闭了启动时的本地调试端口（`DevToolsActivePort`），且 Sidecar UI API 仅开放了右侧辅助栏入口（`SIDECAR_UI_ENTRYPOINT_AUX_PANE`）。通过用户态启动器默认传入 `--remote-debugging-port=9222`，即可在不修改官方主程序的前提下稳定恢复聊天框小圆环。如需卸载启动器，可运行 `bash ~/.gemini/config/plugins/desktop-context/scripts/uninstall.sh`。
 
 ---
 
