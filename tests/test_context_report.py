@@ -241,7 +241,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(r["active_checkpoint"], 0)
         out = self.run_report()
         self.assertIn("Estimated after compaction · updates next turn", out)
-        self.assertIn("Checkpoints (1) · /rewind", out)
+        self.assertIn("Checkpoints (1) · /compact", out)
         self.assertIn("└ Checkpoint 1 (active, in context): Fix the login bug", out)
 
     def test_checkpoint_already_in_generation_is_not_newer(self):
@@ -296,6 +296,10 @@ class ReportTest(unittest.TestCase):
         home_uri = "file:///" + str(self.home).replace("\\", "/").lstrip("/")
         self.db.step(VIEW_FILE, metadata=tool_call("v" * 40), payload_field=P_VIEW_FILE,
                      payload=m(f(1, home_uri + "/.gemini/skills/foo/SKILL.md"), f(17, 1)))
+        self.db.step(VIEW_FILE, metadata=tool_call("v" * 20), payload_field=P_VIEW_FILE,
+                     payload=m(f(1, str(self.home / ".gemini/skills/foo/SKILL.md")), f(17, 1)))  # multi-chunk same skill
+        self.db.step(VIEW_FILE, metadata=tool_call("b" * 24), payload_field=P_VIEW_FILE,
+                     payload=m(f(1, str(self.home / ".gemini/skills/bar/skill.md"))))  # case-insensitive without field 17
         edit = lambda path: f(2, f(1, f(8, home_uri + path)))  # noqa: E731
         self.db.step(CODE_ACTION, metadata=tool_call("w" * 80), payload_field=P_CODE_ACTION, payload=m(edit("/brain/task.md"), f(21, 1)))
         self.db.step(CODE_ACTION, metadata=tool_call("w" * 80), payload_field=P_CODE_ACTION, payload=m(edit("/brain/task.md"), f(21, 1)))
@@ -303,19 +307,37 @@ class ReportTest(unittest.TestCase):
         (self.home / ".gemini" / "skills").mkdir(parents=True)
         (self.home / ".gemini" / "GEMINI.md").write_text("x")
         (self.home / ".gemini" / "antigravity" / "skills").mkdir(parents=True)
-        (self.home / ".gemini" / "config" / "skills").mkdir(parents=True)  # not an auto-loaded folder
+        (self.home / ".gemini" / "config" / "skills").mkdir(parents=True)
+        (self.home / ".gemini" / "config" / "rules").mkdir(parents=True)
+        (self.home / ".gemini" / "config" / "rules" / "AGENTS.md").write_text("r")
+        (self.home / ".gemini" / "config" / "mcp_config.json").write_text("{}")
         (self.home / "ws" / ".agents" / "rules").mkdir(parents=True)
         (self.home / "ws" / ".agents" / "hooks.json").write_text("{}")
+        (self.home / "ws" / "AGENTS.md").write_text("w")
         r = self.report("--workspace", str(self.home / "ws"))
-        self.assertEqual(r["skill_files"], [{"path": "~/.gemini/skills/foo/SKILL.md", "tokens": 10}])
+        self.assertEqual(r["skill_files"], [
+            {"path": "~/.gemini/skills/foo/SKILL.md", "tokens": 15},
+            {"path": "~/.gemini/skills/bar/skill.md", "tokens": 6},
+        ])
         self.assertEqual(r["artifact_files"], [{"path": "~/brain/task.md", "tokens": 20}])
         self.assertEqual(r["knowledge_files"], [{"path": "~/knowledge/a.md", "tokens": 10}])
-        self.assertEqual([s["path"] for s in r["system_files"]],
-                         ["~/.gemini/GEMINI.md", "~/.gemini/skills/", "~/.gemini/antigravity/skills/",
-                          ".agents/rules/", ".agents/hooks.json"])
+        self.assertEqual(
+            [s["path"] for s in r["system_files"]],
+            [
+                "~/.gemini/config/mcp_config.json",
+                "~/.gemini/config/rules/AGENTS.md",
+                "~/.gemini/config/skills/",
+                "~/.gemini/GEMINI.md",
+                "~/.gemini/skills/",
+                "~/.gemini/antigravity/skills/",
+                "AGENTS.md",
+                ".agents/rules/",
+                ".agents/hooks.json",
+            ],
+        )
         out = self.run_report("--workspace", str(self.home / "ws"))
-        self.assertIn("Knowledge files · /rules\n └ ~/knowledge/a.md: 10 tokens", out)
-        self.assertIn("System files · auto-loaded\n └ ~/.gemini/GEMINI.md\n", out)
+        self.assertIn("Knowledge files · knowledge\n └ ~/knowledge/a.md: 10 tokens", out)
+        self.assertIn("System files · auto-loaded\n └ ~/.gemini/config/mcp_config.json\n", out)
 
     def test_generic_steps_are_rehydrated(self):
         home_uri = "file:///" + str(self.home).replace("\\", "/").lstrip("/")
@@ -434,7 +456,7 @@ class ReportTest(unittest.TestCase):
         self.assertTrue(lines[2].endswith("Test Model · 1.3k/256.0k tokens"))
         self.assertIn("◉ Agent responses: 0 tokens (0.0%)", out)  # always shown
         self.assertNotIn("Plugins", out)  # zero, hidden
-        self.assertTrue(out.rstrip().endswith("Related: /artifact · /skill · /rewind"))
+        self.assertTrue(out.rstrip().endswith("Related: /compact · /btw · /learn · /plugin"))
         grid_rows = [l for l in lines if l.startswith(("◉", "□"))]
         self.assertEqual(len(grid_rows[0].split("   ")[0].split(" ")), 20)  # 20 columns at width 100
 

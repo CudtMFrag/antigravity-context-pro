@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
-import { ACTIVE_CONV_FILE, startRingInjector } from './inject-ring.mjs';
+import { ACTIVE_CONV_FILE, startRingInjector, triggerCompactOnActivePage } from './inject-ring.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'context_report.py');
@@ -227,6 +227,14 @@ app.api('/api/report', async (data) => {
     return { error: 'failed', message: err.message };
   }
 }, 'GET');
+
+app.api('/api/compact', async () => {
+  try {
+    return await triggerCompactOnActivePage();
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+}, 'POST');
 
 app.run();
 refreshCatalog();

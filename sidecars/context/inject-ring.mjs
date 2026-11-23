@@ -628,7 +628,11 @@ const CLIENT_UI_SCRIPT = String.raw`
     }
     style.textContent = [
       '#' + RING_ID + ' { position: relative; display: inline-flex; align-items: center; margin: 0 2px; z-index: 50; font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }',
-      '#agy-ring-btn { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--muted-foreground, #9aa0a6); font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease; }',
+      '#agy-ring-btn { position: relative; overflow: hidden; display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--muted-foreground, #9aa0a6); font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease; }',
+      '#agy-ring-btn::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: rgba(16, 185, 129, 0.22); pointer-events: none; transition: none; }',
+      '#agy-ring-btn.holding::after { width: 100%; transition: width 0.6s linear; }',
+      '#agy-ring-btn.holding { border-color: rgba(16, 185, 129, 0.45); color: var(--foreground, #e3e3e3); }',
+      '#agy-ring-btn.compacting { border-color: rgba(76, 141, 246, 0.45); color: var(--foreground, #e3e3e3); }',
       '#agy-ring-btn:hover, #agy-ring-btn.active { background: rgba(128,128,128,0.1); border-color: rgba(128,128,128,0.18); color: var(--foreground, #e3e3e3); }',
       '#' + POPOVER_ID + ' { position: fixed; width: 304px; padding: 11px 13px; border-radius: 10px; background: var(--card, #1b1c1f); color: var(--foreground, #e3e3e3); border: 1px solid var(--border, rgba(128,128,128,0.22)); box-shadow: 0 10px 28px rgba(0,0,0,0.36); backdrop-filter: blur(16px); font-size: 12px; line-height: 1.35; z-index: 99999; display: none; text-align: left; }',
       '#' + POPOVER_ID + '.open { display: block; }',
@@ -650,6 +654,100 @@ const CLIENT_UI_SCRIPT = String.raw`
       '#agy-open-sidecar-btn:hover { background: rgba(128,128,128,0.14); color: var(--foreground, #e3e3e3); border-color: rgba(128,128,128,0.32); }'
     ].join('\n');
   }
+
+  function flashRingStatus(text, durationMs = 2000) {
+    const btn = document.getElementById('agy-ring-btn');
+    const label = document.getElementById('agy-ring-label');
+    if (btn) btn.classList.add('compacting');
+    if (label) label.textContent = text;
+    window.__AGY_RING_STATUS_UNTIL__ = Date.now() + durationMs;
+    setTimeout(() => {
+      if (Date.now() >= (window.__AGY_RING_STATUS_UNTIL__ || 0)) {
+        const curBtn = document.getElementById('agy-ring-btn');
+        if (curBtn) curBtn.classList.remove('compacting');
+        if (window.__AGY_RING_RENDER__) window.__AGY_RING_RENDER__();
+      }
+    }, durationMs + 40);
+  }
+
+  function triggerCompact() {
+    if (Date.now() < (window.__AGY_COMPACT_LOCK_UNTIL__ || 0)) {
+      return { ok: false, reason: 'busy' };
+    }
+    const composer =
+      document.getElementById('antigravity.agentSidePanelInputBox') ||
+      document.querySelector('.surface-composer-card, [class*="surface-composer"]') ||
+      document.querySelector('[data-testid="agent-input-box"], [data-testid="composer"]') ||
+      document.body;
+    const input = composer.querySelector('[contenteditable="true"][role="combobox"], [contenteditable="true"], textarea');
+    if (!input) return { ok: false, reason: 'no-input' };
+
+    const existing = (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim();
+    if (existing.length > 0 && existing !== '/compact') {
+      flashRingStatus('Clear input', 1600);
+      return { ok: false, reason: 'draft-not-empty' };
+    }
+
+    window.__AGY_COMPACT_LOCK_UNTIL__ = Date.now() + 4000;
+    input.focus();
+
+    if (existing !== '/compact') {
+      if (input.tagName === 'TEXTAREA') {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, '/compact');
+        else input.value = '/compact';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      } else {
+        const sel = window.getSelection();
+        if (sel) {
+          const range = document.createRange();
+          range.selectNodeContents(input);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        try {
+          document.execCommand('insertText', false, '/compact');
+        } catch (_) {}
+        if ((input.textContent || '').trim() !== '/compact') {
+          input.dispatchEvent(new InputEvent('beforeinput', {
+            inputType: 'insertText',
+            data: '/compact',
+            bubbles: true,
+            cancelable: true
+          }));
+        }
+      }
+    }
+
+    flashRingStatus('Compacting…', 2500);
+
+    setTimeout(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+      setTimeout(() => {
+        const sendBtn = composer.querySelector(
+          '[data-testid^="send-button"]:not([disabled]), .agy-send-button:not([disabled]), ' +
+          'button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled])'
+        );
+        if (sendBtn) {
+          sendBtn.click();
+          return;
+        }
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        setTimeout(() => {
+          const cur = (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim();
+          if (cur === '/compact') {
+            input.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, metaKey: true, ctrlKey: true, bubbles: true, cancelable: true
+            }));
+          }
+        }, 120);
+      }, 40);
+    }, 80);
+
+    return { ok: true };
+  }
+
+  window.__AGY_TRIGGER_COMPACT__ = triggerCompact;
 
   function positionPopover(btn, pop) {
     const rect = btn.getBoundingClientRect();
@@ -723,16 +821,16 @@ const CLIENT_UI_SCRIPT = String.raw`
     if (!target || !target.container) return;
 
     let wrap = document.getElementById(RING_ID);
-    if (wrap && wrap.dataset.v !== '4') {
+    if (wrap && wrap.dataset.v !== '5') {
       wrap.remove();
       wrap = null;
     }
     if (!wrap) {
       wrap = document.createElement('div');
       wrap.id = RING_ID;
-      wrap.dataset.v = '4';
+      wrap.dataset.v = '5';
       wrap.innerHTML = [
-        '<button type="button" id="agy-ring-btn">',
+        '<button type="button" id="agy-ring-btn" title="Click for telemetry · Hold to /compact">',
         '  <svg width="13" height="13" viewBox="0 0 36 36" style="transform: rotate(-90deg); flex: none;">',
         '    <circle cx="18" cy="18" r="14.5" fill="none" stroke="currentColor" stroke-opacity="0.22" stroke-width="3.4"></circle>',
         '    <circle id="agy-ring-arc" cx="18" cy="18" r="14.5" fill="none" stroke="#10b981" stroke-width="3.6" stroke-dasharray="0 100" stroke-linecap="round" pathLength="100"></circle>',
@@ -744,8 +842,39 @@ const CLIENT_UI_SCRIPT = String.raw`
 
       const btn = wrap.querySelector('#agy-ring-btn');
       const pop = wrap.querySelector('#' + POPOVER_ID);
+      const LONG_PRESS_MS = 600;
+      let holdTimer = null;
+      let suppressClick = false;
+      const cancelHold = () => {
+        if (holdTimer) {
+          clearTimeout(holdTimer);
+          holdTimer = null;
+        }
+        btn.classList.remove('holding');
+      };
+      btn.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        cancelHold();
+        suppressClick = false;
+        btn.classList.add('holding');
+        holdTimer = setTimeout(() => {
+          holdTimer = null;
+          suppressClick = true;
+          btn.classList.remove('holding');
+          pop.classList.remove('open');
+          btn.classList.remove('active');
+          triggerCompact();
+        }, LONG_PRESS_MS);
+      });
+      btn.addEventListener('pointerup', cancelHold);
+      btn.addEventListener('pointerleave', cancelHold);
+      btn.addEventListener('pointercancel', cancelHold);
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (suppressClick) {
+          suppressClick = false;
+          return;
+        }
         const isOpen = pop.classList.toggle('open');
         btn.classList.toggle('active', isOpen);
         if (isOpen) positionPopover(btn, pop);
@@ -792,7 +921,10 @@ const CLIENT_UI_SCRIPT = String.raw`
     const dash = Math.min(100, Math.max(1, pct));
     arc.setAttribute('stroke', color);
     arc.setAttribute('stroke-dasharray', dash + ' 100');
-    label.textContent = pct.toFixed(1) + '%';
+    if (!window.__AGY_RING_STATUS_UNTIL__ || Date.now() >= window.__AGY_RING_STATUS_UNTIL__) {
+      btn.classList.remove('compacting');
+      label.textContent = pct.toFixed(1) + '%';
+    }
 
     const limit = Number(r.limit_tokens) || 1048576;
     const used = Number(r.used_tokens) || 0;
@@ -884,7 +1016,8 @@ const CLIENT_UI_SCRIPT = String.raw`
       '<button type="button" id="agy-open-sidecar-btn">',
       '  <span style="display:inline-flex;align-items:center;gap:6px;"><span class="agy-m-icon">' + ICONS.panel + '</span><span>Open Context &amp; Turn Inspector</span></span>',
       '  <span class="agy-m-icon">' + ICONS.arrow + '</span>',
-      '</button>'
+      '</button>',
+      '<div style="margin-top:5px;text-align:center;font-size:10px;color:var(--muted-foreground,#9aa0a6);opacity:0.75;">Hold ring to /compact</div>'
     ].join('');
 
     if (pop.classList.contains('open')) {
@@ -1116,6 +1249,19 @@ export function startRingInjector(options = {}) {
 
   tick();
   setInterval(tick, POLL_INTERVAL_MS);
+}
+
+export async function triggerCompactOnActivePage() {
+  for (const entry of activePages.values()) {
+    if (entry.ws.readyState !== WebSocket.OPEN) continue;
+    const res = await cdpCall(entry.ws, 'Runtime.evaluate', {
+      expression: 'window.__AGY_TRIGGER_COMPACT__ ? window.__AGY_TRIGGER_COMPACT__() : { ok: false, reason: "not-ready" }',
+      returnByValue: true,
+    });
+    const val = res?.result?.value;
+    if (val && val.ok) return val;
+  }
+  return { ok: false, reason: 'no-cdp' };
 }
 
 const isDirectRun =

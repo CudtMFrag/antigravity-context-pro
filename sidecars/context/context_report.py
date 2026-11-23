@@ -206,7 +206,7 @@ def packed_original_step(generic: Msg) -> bytes | None:
 
 
 def is_skill_file(path: str) -> bool:
-    return path.replace("\\", "/").endswith("/SKILL.md")
+    return path.replace("\\", "/").lower().endswith("/skill.md")
 
 
 class Step:
@@ -357,25 +357,61 @@ def detect_system_files(home: str, workspace: str | None, app_dir: str) -> list[
         return []
     gemini = Path(home) / ".gemini"
     disp = "~/" + gemini.name
-    found = []
-    f = gemini / "GEMINI.md"
-    if f.exists() and not f.is_dir():
-        found.append(disp + "/GEMINI.md")
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(item: str):
+        if item not in seen:
+            seen.add(item)
+            found.append(item)
+
+    # Global Antigravity 2.0+ configuration (~/.gemini/config/)
+    cfg = gemini / "config"
+    if cfg.is_dir():
+        for name in ("GEMINI.md", "AGENTS.md", "mcp_config.json", "hooks.json"):
+            f = cfg / name
+            if f.exists() and not f.is_dir():
+                add(f"{disp}/config/{name}")
+        rules_dir = cfg / "rules"
+        if rules_dir.is_dir():
+            rule_files = sorted(p for p in rules_dir.glob("*.md") if p.is_file())
+            if rule_files:
+                for rf in rule_files:
+                    add(f"{disp}/config/rules/{rf.name}")
+            else:
+                add(f"{disp}/config/rules/")
+        for sub in ("skills", "agents", "plugins"):
+            if (cfg / sub).is_dir():
+                add(f"{disp}/config/{sub}/")
+
+    # Legacy ~/.gemini/ and ~/.gemini/<app_dir>/ customizations
+    for name in ("GEMINI.md", "AGENTS.md"):
+        f = gemini / name
+        if f.exists() and not f.is_dir():
+            add(f"{disp}/{name}")
     for sub in ("skills", "rules", "agents", "global_workflows"):
         if (gemini / sub).is_dir():
-            found.append(f"{disp}/{sub}/")
+            add(f"{disp}/{sub}/")
     if app_dir:
         for sub in ("rules", "skills", "agents", "global_workflows"):
             if (gemini / app_dir / sub).is_dir():
-                found.append(f"{disp}/{app_dir}/{sub}/")
+                add(f"{disp}/{app_dir}/{sub}/")
+
+    # Workspace customizations
     if workspace:
-        for root in (".agents", "_agents"):
+        ws = Path(workspace)
+        for name in ("GEMINI.md", "AGENTS.md", "skills.json", "plugins.json", "mcp_config.json"):
+            f = ws / name
+            if f.exists() and not f.is_dir():
+                add(name)
+        for root in (".agents", ".agent", "_agents", "_agent"):
             for sub in ("rules", "skills", "agents", "workflows"):
-                if (Path(workspace) / root / sub).is_dir():
-                    found.append(f"{root}/{sub}/")
-            hooks = Path(workspace) / root / "hooks.json"
-            if hooks.exists() and not hooks.is_dir():
-                found.append(f"{root}/hooks.json")
+                if (ws / root / sub).is_dir():
+                    add(f"{root}/{sub}/")
+            for fname in ("hooks.json", "mcp_config.json"):
+                fp = ws / root / fname
+                if fp.exists() and not fp.is_dir():
+                    add(f"{root}/{fname}")
     return [(p, 0) for p in found]
 
 
@@ -388,7 +424,8 @@ def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
     st["has_breakdown"] = False
     st["active_checkpoint"] = -1
     checkpoints, knowledge, artifacts, skill_files = [], [], [], []
-    seen_k, seen_a, seen_s = set(), set(), set()
+    seen_k, seen_a = set(), set()
+    skill_idx: dict[str, int] = {}
 
     chat = gen.msg(1) if gen is not None else None
     chat_start = chat.msg(9) if chat is not None else None
@@ -433,11 +470,15 @@ def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
                 knowledge.append((short, tok))
 
         vf = step.payload(STEP_VIEW_FILE)
-        if vf is not None and vf.int(17):  # is_skill_file
+        if vf is not None and (vf.int(17) or is_skill_file(vf.str(1))):  # is_skill_file
             uri = vf.str(1)
-            if uri not in seen_s:
-                seen_s.add(uri)
-                skill_files.append((shorten_path(uri), tok))
+            short = shorten_path(uri)
+            if short in skill_idx:
+                i = skill_idx[short]
+                skill_files[i] = (short, skill_files[i][1] + tok)
+            elif short:
+                skill_idx[short] = len(skill_files)
+                skill_files.append((short, tok))
 
     cwm = chat_start.msg(10) if chat_start is not None else None
     breakdown = cwm.msg(3) if cwm is not None else None
@@ -627,7 +668,7 @@ def render_checkpoints(st: dict) -> str:
     if view is None:
         return ""
     out = [
-        f"Checkpoints ({view['count']}) · /rewind\n",
+        f"Checkpoints ({view['count']}) · /compact\n",
         f"└ Checkpoint {view['active_number']} (active, in context): {view['active_text']}\n",
     ]
     if view["historical"]:
@@ -665,11 +706,11 @@ def render(st: dict, model: str, system_files: list[tuple[str, int]], term_width
     ck = render_checkpoints(st)
     if ck:
         parts += ["\n", ck]
-    parts.append(render_file_section("Knowledge files", "/rules", st["knowledge_files"]))
-    parts.append(render_file_section("Artifact files", "/artifact", st["artifact_files"]))
-    parts.append(render_file_section("Skill files", "/skill", st["skill_files"]))
+    parts.append(render_file_section("Knowledge files", "knowledge", st["knowledge_files"]))
+    parts.append(render_file_section("Artifact files", "artifacts", st["artifact_files"]))
+    parts.append(render_file_section("Skill files", "loaded", st["skill_files"]))
     parts.append(render_file_section("System files", "auto-loaded", system_files))
-    parts.append("\nRelated: /artifact · /skill · /rewind")
+    parts.append("\nRelated: /compact · /btw · /learn · /plugin")
     return "".join(parts)
 
 
