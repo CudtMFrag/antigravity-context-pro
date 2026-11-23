@@ -705,10 +705,11 @@ const CLIENT_UI_SCRIPT = String.raw`
           sel.removeAllRanges();
           sel.addRange(range);
         }
+        let inserted = false;
         try {
-          document.execCommand('insertText', false, '/compact');
+          inserted = Boolean(document.execCommand('insertText', false, '/compact'));
         } catch (_) {}
-        if ((input.textContent || '').trim() !== '/compact') {
+        if (!inserted) {
           input.dispatchEvent(new InputEvent('beforeinput', {
             inputType: 'insertText',
             data: '/compact',
@@ -722,27 +723,38 @@ const CLIENT_UI_SCRIPT = String.raw`
     flashRingStatus('Compacting…', 2500);
 
     setTimeout(() => {
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+      const current = (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim();
+      if (!current) {
+        input.dispatchEvent(new InputEvent('beforeinput', {
+          inputType: 'insertText',
+          data: '/compact',
+          bubbles: true,
+          cancelable: true
+        }));
+      }
       setTimeout(() => {
-        const sendBtn = composer.querySelector(
-          '[data-testid^="send-button"]:not([disabled]), .agy-send-button:not([disabled]), ' +
-          'button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled])'
-        );
-        if (sendBtn) {
-          sendBtn.click();
-          return;
-        }
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
         setTimeout(() => {
-          const cur = (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim();
-          if (cur === '/compact') {
-            input.dispatchEvent(new KeyboardEvent('keydown', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, metaKey: true, ctrlKey: true, bubbles: true, cancelable: true
-            }));
+          const sendBtn = composer.querySelector(
+            '[data-testid^="send-button"]:not([disabled]), .agy-send-button:not([disabled]), ' +
+            'button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled])'
+          );
+          if (sendBtn) {
+            sendBtn.click();
+            return;
           }
-        }, 120);
-      }, 40);
-    }, 80);
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+          setTimeout(() => {
+            const cur = (input.tagName === 'TEXTAREA' ? input.value : (input.textContent || '')).trim();
+            if (cur === '/compact') {
+              input.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, metaKey: true, ctrlKey: true, bubbles: true, cancelable: true
+              }));
+            }
+          }, 120);
+        }, 40);
+      }, 30);
+    }, 90);
 
     return { ok: true };
   }
